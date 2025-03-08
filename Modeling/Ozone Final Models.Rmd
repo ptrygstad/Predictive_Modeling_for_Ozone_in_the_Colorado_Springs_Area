@@ -1,0 +1,955 @@
+---
+title: "Ozone Final Models"
+output: pdf_document
+date: '2023-12-08'
+---
+
+#Imports
+```{r, warning=FALSE}
+library(ISLR)
+library(dplyr)
+library(MASS)
+library(car) # for VIF
+library(corrplot) #correlation plot
+library(RColorBrewer) #for corrplot 
+library(caret) #caret cross validation machine learning
+library(leaps) #linear feature selection
+library(glmnet) #for LASSO regression
+library(mgcv) #GAM
+library(randomForest) #random forest 
+library(nnet) # for ANN
+library(gbm) #for boosted trees
+library(ggformula) #for plots
+library(DMwR2) #imputation
+library(naniar) #missing values
+library(VIM) #for aggr()
+```
+
+
+
+
+Load & Re-organize Data
+```{r, warning=FALSE}
+setwd('/Users/paultrygstad/Documents/Grad School/Classes/Fall 2023/DS785/Data/Data Cleaning/Cleaned Data')
+data <- read.csv("Cleaned_Model_Data_final.csv")  
+head(data)
+
+colnames(data)
+```
+
+#Missing Values
+```{r}
+data$Date = as.Date(data$Date)
+aggr(data, numbers=TRUE, sortVars=TRUE, cex.axis=.7, gap=3, 
+     ylab=c("Proportion of Missingness","Missingness Pattern"))
+gg_miss_fct(data, Date)
+gg_miss_var(data, show_pct = TRUE)
+
+```
+
+
+
+#KNN Imputation
+```{r, warning=FALSE}
+# KNN Imputation
+set.seed(28) # for reproducibility
+data_impute = knnImputation(data[,c(-30)], k=2, scale=TRUE) #use 10 as default
+head(data_impute)
+data_impute["Date"] = data["Date"] #add date back into dataframe
+#plot imputed values
+scatter_logic = is.na(data$Average.Mixing.Height)
+scatter_data = data
+data_impute$Average.Mixing.Height[scatter_logic]
+
+scatter_data["Average.Mixing.Height.Imputed"] = scatter_data$Average.Mixing.Height
+for (ii in 1:length(scatter_logic)) {
+  if (scatter_logic[ii] == FALSE) {
+    scatter_data$Average.Mixing.Height.Imputed[ii] = NA
+  } else {
+    scatter_data$Average.Mixing.Height.Imputed[ii] = data_impute$Average.Mixing.Height[ii]
+  } }
+#plot
+ggplot(scatter_data, aes(y=Average.Mixing.Height, x=Date))  + geom_point(size=.5) + geom_point(aes(y=Average.Mixing.Height.Imputed), size=.5,color="red") + labs(title = "Imputed Values of Mixing Height using 2-Nearest Neighbors", y = "Average Mixing Height (m)")
+```
+
+#Reorganize and filter Data
+```{r}
+#move ozone measurement [16] 
+#drop latitude [18], longitude [19], elevation [20]
+#drop 1 hour ozone for AFA [1] and MAN [15]
+colnames(data_impute)
+data_filtered = data_impute[,c(2,16,3,4,5,6,7,8,9,10,11,12,13,14,17,21,22,23,24,25,26,27,28,29,30)]
+#columns
+colnames(data_filtered)
+#data_filtered$Date = as.Date(data_filtered$Date) # change Date column data type
+```
+
+#Correlation plot
+```{r}
+#correlation plot
+data_cor = cor(data_filtered[,-c(25)])
+corrplot(data_cor, type="upper", order="hclust",
+         col=rev(brewer.pal(n=8, name="RdYlBu")), tl.cex = .6)
+```
+
+#Preliminary Models to check VIF
+```{r}
+#preliminary model for AFA
+afa_preliminary_linear_fit = lm(AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean ~.
+                                -MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean,data=data_filtered) 
+summary(afa_preliminary_linear_fit) #print summary
+vif(afa_preliminary_linear_fit) #examine VIF of variables
+#preliminary model for MAN
+man_preliminary_linear_fit = lm(MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean ~.
+                                -AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean,data=data_filtered) 
+summary(man_preliminary_linear_fit) 
+vif(man_preliminary_linear_fit) 
+```
+
+
+```{r}
+colnames(data_filtered)
+#remove collinear predictors: 
+  # HW24 Sulfur dioxide 1 hr mean [9] and 3 hour bulk average [10] - retain 5 min avg
+  # HW24 CO 1_Hour [6], 
+  # COS Avg Temp [20], - retrain HW24 Temp
+  # HW24 Scalar wind speed and direction [3,4]
+  # drop HW24 resultant wind speed [8] - retain COS daily avg wind speed
+  # COS 5second wind speeds params [22,24]
+ozone_8_hr = data_filtered[,-c(3,4,6,8,9,10,20,22,24)]
+colnames(ozone_8_hr)
+
+#new correlation plot
+data_cor = cor(ozone_8_hr[,-c(16)]) #don't include date for corrplot
+corrplot(data_cor, type="upper", order="hclust",
+         col=rev(brewer.pal(n=8, name="RdYlBu")), tl.cex = .5)
+```
+#Preliminary Model to check VIF between Fasted 2 minute wind speed and Average Daily Wind Speed
+```{r}
+afa_preliminary_linear_fit = lm(AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean ~.
+                                -MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean,data=ozone_8_hr) 
+summary(afa_preliminary_linear_fit) 
+vif(afa_preliminary_linear_fit) 
+man_preliminary_linear_fit = lm(MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean ~.
+                                -AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean,data=ozone_8_hr) 
+summary(man_preliminary_linear_fit) 
+vif(man_preliminary_linear_fit) 
+
+#remove Average Daily Wind Speed due to higher vif and collinearity with fastest 2 minute wind speed
+ozone_8_hr = ozone_8_hr[,-c(10)]
+colnames(ozone_8_hr)
+
+#new correlation plot
+data_cor = cor(ozone_8_hr[,-c(15)]) #don't include date for corrplot
+corrplot(data_cor, type="upper", order="hclust",
+         col=rev(brewer.pal(n=8, name="RdYlBu")), tl.cex = .5)
+```
+
+
+#Explore data and plot MAN_8_hr over time
+```{r}
+#MAN: orange, AFA: blue (Air Force colors)
+ggplot(ozone_8_hr, aes(y=MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean, x=Date), ylab("Ozone"))  + geom_point(size=.5, color="dark orange") + geom_point(aes(y=AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean),size=.5, color="dark blue") + labs(title = "Ozone Concentrations at AFA and MAN Monitors by Date", y = "Ozone (ppm)")
+```
+
+#Ensure no missingness
+```{r}
+aggr(ozone_8_hr, numbers=TRUE, sortVars=TRUE, cex.axis=.7, gap=3, 
+     ylab=c("Proportion of Missingness","Missingness Pattern"))
+gg_miss_fct(ozone_8_hr, Date)
+gg_miss_var(ozone_8_hr, show_pct = TRUE)
+
+
+```
+
+```{r}
+colnames(ozone_8_hr)
+```
+# Check linear modeling assumptions
+```{r}
+#examine histograms
+hist(as.numeric(ozone_8_hr$AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean)) # relatively normal
+hist(as.numeric(ozone_8_hr$MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean)) # relatively normal
+hist(as.numeric(ozone_8_hr$HW24_Carbon.monoxide_8.HR.RUN.AVG.END.HOUR_Arithmetic.Mean)) # -------->non-normal
+hist(as.numeric(ozone_8_hr$HW24_Wind.Direction...Resultant_1.HOUR_Arithmetic.Mean)) # relatively normal
+hist(as.numeric(ozone_8_hr$HW24_SO2.max.5.min.avg_1.HOUR_Arithmetic.Mean)) # -------->non-normal
+hist(as.numeric(ozone_8_hr$HW24_Relative.Humidity_1.HOUR_Arithmetic.Mean)) # relatively normal
+hist(as.numeric(ozone_8_hr$HW24_Outdoor.Temperature_1.HOUR_Arithmetic.Mean)) # relatively normal
+hist(as.numeric(ozone_8_hr$HW24_Std.Dev.Hz.Wind.Direction_1.HOUR_Arithmetic.Mean)) # relatively normal
+hist(as.numeric(ozone_8_hr$Average.Mixing.Height)) # -------->non-normal
+hist(as.numeric(ozone_8_hr$Precipitation)) # -------->unbalanced
+hist(as.numeric(ozone_8_hr$Snowfall)) # -------->unbalanced
+hist(as.numeric(ozone_8_hr$Snow.depth)) # -------->unbalanced
+hist(as.numeric(ozone_8_hr$Direction.of.fastest.2.minute.wind)) # relatively normal
+hist(as.numeric(ozone_8_hr$Fastest.2.minute.wind.speed)) # relatively normal
+
+```
+```{r}
+#AFA ozone
+mod = lm(AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="AFA Ozone")
+#MAN ozone
+mod = lm(MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="MAN Ozone")
+#HW24 CO
+mod = lm(HW24_Carbon.monoxide_8.HR.RUN.AVG.END.HOUR_Arithmetic.Mean~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="HW24 8 HR Max Avg CO")
+#HW24 Wind direction
+mod = lm(HW24_Wind.Direction...Resultant_1.HOUR_Arithmetic.Mean~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="HW24 Resultant Wind Direction")
+#HW24 S02
+mod = lm(HW24_SO2.max.5.min.avg_1.HOUR_Arithmetic.Mean~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="SO2 Max Avg 5 min")
+#HW24 Relative Humidity
+mod = lm(HW24_Relative.Humidity_1.HOUR_Arithmetic.Mean~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="Relative Humidity")
+#HW24 Temp
+mod = lm(HW24_Outdoor.Temperature_1.HOUR_Arithmetic.Mean~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="HW24 Avg Hourly Temp")
+
+#HW24 Std Dev Hz Wind Direction
+mod = lm(HW24_Std.Dev.Hz.Wind.Direction_1.HOUR_Arithmetic.Mean~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="Std Dev Hz Wind Direction")
+
+#IGRA Avg Mixing Height
+mod = lm(Average.Mixing.Height~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="Avg Mixing Height")
+
+#COS Precipitation
+mod = lm(Precipitation~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="Precipitation")
+
+#COS Snowfall
+mod = lm(Snowfall~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="Snowfall")
+
+#COS Snowdepth
+mod = lm(Snow.depth~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="Snowdepth")
+
+#COS fastest two minute wind direction
+mod = lm(Direction.of.fastest.2.minute.wind~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="COS Fast 2 minute wind direction")
+
+#COS fastest two minute wind speed
+mod = lm(Fastest.2.minute.wind.speed~.,
+         data = ozone_8_hr)
+par(mfrow = c(2, 2))
+plot(mod, main="COS fastest two minute wind speed")
+```
+
+#Transform Mixing height to meet linear model assumptions
+```{r}
+#transform variable with box cox
+ozone_transformed = ozone_8_hr
+pre_T_fit = lm(Average.Mixing.Height ~ ., data = ozone_transformed)
+#select transformation of response
+boxcox(pre_T_fit)
+lam <- boxcox(pre_T_fit)$x[which.max(boxcox(pre_T_fit)$y)]  # identify response transform
+lam
+#transform response and store
+ozone_transformed$Average.Mixing.Height.power <- ozone_transformed$Average.Mixing.Height^(lam)
+#examine histograms of variable before and after transformation
+hist(ozone_transformed$Average.Mixing.Height)
+hist(ozone_transformed$Average.Mixing.Height.power)
+```
+
+Transform additional variables for linear model
+```{r}
+
+#log transform
+#delete non-transformed columns 
+ozone_transformed <- ozone_transformed %>%
+  mutate(log_HW24_Carbon.monoxide_8.HR.RUN.AVG.END.HOUR_Arithmetic.Mean = log(HW24_Carbon.monoxide_8.HR.RUN.AVG.END.HOUR_Arithmetic.Mean),
+         log_HW24_SO2.max.5.min.avg_1.HOUR_Arithmetic.Mean = log(HW24_SO2.max.5.min.avg_1.HOUR_Arithmetic.Mean))
+
+#A -Inf value is produced in log_HW24_SO2.max.5.min.avg_1.HOUR_Arithmetic.Mean, so manually replace with -10
+log_sulfur <- ozone_transformed$log_HW24_SO2.max.5.min.avg_1.HOUR_Arithmetic.Mean
+for (ii in 1:length(log_sulfur)) {
+  if (log_sulfur[ii] == -Inf) {
+    ozone_transformed$log_HW24_SO2.max.5.min.avg_1.HOUR_Arithmetic.Mean[ii] = -10
+  } }
+  
+#examine histograms of variable before and after transformation
+par(mfrow=c(1,2))
+hist(ozone_8_hr$HW24_Carbon.monoxide_8.HR.RUN.AVG.END.HOUR_Arithmetic.Mean)
+hist(ozone_transformed$log_HW24_Carbon.monoxide_8.HR.RUN.AVG.END.HOUR_Arithmetic.Mean)
+
+par(mfrow=c(1,2))
+hist(ozone_8_hr$HW24_SO2.max.5.min.avg_1.HOUR_Arithmetic.Mean) # log of Sulfur Dioxide creates too many NA's 
+hist(ozone_transformed$log_HW24_SO2.max.5.min.avg_1.HOUR_Arithmetic.Mean)
+
+
+```
+
+#drop non-transformed variables
+```{r}
+dim(ozone_8_hr)
+ozone_transformed <- ozone_transformed %>% dplyr::select(-HW24_Carbon.monoxide_8.HR.RUN.AVG.END.HOUR_Arithmetic.Mean, -HW24_SO2.max.5.min.avg_1.HOUR_Arithmetic.Mean,-Average.Mixing.Height,
+                                                         -Precipitation,-Snowfall,-Snow.depth) #drop unbalanced variables
+colnames(ozone_transformed)
+dim(ozone_transformed)
+
+```
+#check transformed df for missingness
+```{r}
+aggr(ozone_transformed, numbers=TRUE, sortVars=TRUE, cex.axis=.7, gap=3, 
+     ylab=c("Proportion of Missingness","Missingness Pattern"))
+gg_miss_fct(ozone_transformed, Date)
+gg_miss_var(ozone_transformed, show_pct = TRUE)
+
+```
+
+# MODELING WITH CARET
+#Hyper-parameter tuning
+
+```{r}
+#Tuning Functions
+#LASSO
+ozone_tuning_LASSO <- function(dataused, ozone_col,lambdaLASSO){
+  set.seed(28)
+  training = trainControl(method = "cv", number = 5) #5 for computational feasibility
+  #fit linear regression with LASSO 
+  fit_LASSO = train(formula(paste(ozone_col, " ~ .")),
+                          data = dataused,
+                          method = "glmnet",
+                          trControl = training,
+                          tuneGrid = expand.grid(alpha=c(1),lambda=lambdaLASSO))
+  print("LASSO Model has been fitted")#debug
+  lam = paste("Best lambda for LASSO is:", fit_LASSO$bestTune$lambda )
+  print(lam)
+  print(Sys.time())
+  return(fit_LASSO)
+}
+#Boosted Trees
+ozone_tuning_BOOST <- function(dataused, ozone_col,lambdaBOOST){
+  set.seed(28)
+  training = trainControl(method = "cv", number = 5) #5 for computational feasibility
+  #fit Boosted Trees 
+  fit_boost = train(formula(paste(ozone_col, " ~ .")),
+                            data = dataused,
+                            method = "gbm",
+                            trControl = training,
+                            tuneGrid = expand.grid(interaction.depth = (1:3), #use max interaction depth of 3 for feasibility
+                                          n.trees = 300,  #use 300 trees (more trees is ideal, but computationally unfeasible)
+                                          shrinkage = lambdaBOOST, #tuned hyperparameter vector
+                                          n.minobsinnode = 10), # use default 
+                             verbose=FALSE) 
+  print("Boosted Trees has been fitted")
+  lam = paste("Best lambda for Boosted Trees is:", fit_boost$bestTune$shrinkage)
+  print(lam)
+  print(Sys.time())
+  return(fit_boost)
+}
+#Artificial Neural Net
+ozone_tuning_ANN <- function(dataused, ozone_col,lambdaANN){
+  set.seed(28)
+  training = trainControl(method = "cv", number = 5) #5 for computational feasibility
+  #fit Artificial Neural Net 
+  fit_ANN = train(formula(paste(ozone_col, " ~ .")),
+                   data = dataused,
+                   method = "nnet",
+                   tuneGrid = expand.grid(size = (1:3), decay = lambdaANN), #limited for computational feasibility
+                   trace = FALSE,
+                   preProc = c("center", "scale"), #good idea to prevent one predictor from overwhelming the model
+                   trControl = training,
+                  verbose=FALSE)
+  print("Artificial Neural Net has been fitted") #debug
+  lam = paste("Best lambda for Artificial Neural Net is:", fit_ANN$bestTune$decay)
+  print(lam)
+  print(Sys.time())
+  return(fit_ANN)
+}
+
+#run all models
+  ozone_tune_models <- function(ozone_data_frame, ozone_col,lambdaLASSO, lambdaBOOST, lamdaANN){
+    set.seed(28)
+  #lasso
+  lasso = ozone_tuning_LASSO(ozone_data_frame,ozone_col,lambdaLASSO)
+  #store plot
+  l <- gf_line(RMSE ~ lambda, data = lasso$results) %>% 
+    gf_refine(coord_cartesian(xlim = c(-.001, .005), ylim = c(0, .015))) %>%
+    gf_vline(xintercept =~ lasso$bestTune$lambda, 
+  color = "red")
+  #boost
+  boost = ozone_tuning_BOOST(ozone_data_frame,ozone_col,lambdaBOOST)
+  b <- plot(boost) #store plot
+  #ann
+  ann = ozone_tuning_ANN(ozone_data_frame,ozone_col, lamdaANN)
+  a <- plot(ann) #store plot
+  print(l)
+  print(b)
+  print(a)
+  best_lambdas = c(lasso$bestTune$lambda,boost$bestTune$shrinkage,ann$bestTune$decay)
+  print(best_lambdas)
+  return(best_lambdas)
+}
+```
+
+
+#AFA tuning #1
+```{r}
+#dataset
+afa_8_hr = ozone_8_hr[-c(2)]#use only AFA measurements
+###Starting Values
+#LASSO
+lassoLambda_AFA = exp(-100:15/10) #initial search space
+#GBM
+boostLambda_AFA = seq(1,10,1) #examine 1-10 for initial search
+#ANN
+annLambda_AFA = seq(1,10,1) #examine 1-10 for initial search
+##run models
+afa_tune_1 = ozone_tune_models(afa_8_hr, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", 
+                               lassoLambda_AFA, boostLambda_AFA, annLambda_AFA)
+```
+
+
+#AFA tuning #2
+```{r}
+###Updated Values
+lassoLambda_AFA = exp(-150:-35/10) #returned to get smaller  values
+boostLambda_AFA = seq(.1,afa_tune_1[2],.1) #best tune is 1, lower bound. Examine 10x finer scale
+annLambda_AFA = seq(.1,afa_tune_1[3],.1)  #best tune is 1, lower bound. Examine 10x finer scale
+##run models
+afa_tune_2 = ozone_tune_models(afa_8_hr, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_AFA, boostLambda_AFA, annLambda_AFA)
+```
+#AFA tuning #3
+```{r}
+###Updated Values - 
+#Keep LASSO lambda since best tune lies within distribution of values
+boostLambda_AFA = seq(.01,afa_tune_2[2]+.1,.01) #best tune is 0.1, lower & upper bound extended. Examine 10x finer scale
+annLambda_AFA = seq(.01,afa_tune_2[3],.01)  #best tune is 0.1, lower bound extended. Examine 10x finer scale
+#run
+afa_tune_3 = ozone_tune_models(afa_8_hr, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_AFA, boostLambda_AFA, annLambda_AFA)
+```
+#AFA tuning #4 (final Tune)
+```{r}
+###Updated Values
+boostLambda_AFA = seq(.05,afa_tune_2[2]+.05,.01) #shorten scale for final models
+annLambda_AFA = seq(.001,.05,.001)  #best tune is continuously smaller, lower bound extended. Examine 100x finer scale
+
+afa_tune_4 = ozone_tune_models(afa_8_hr, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_AFA, boostLambda_AFA, annLambda_AFA)
+#final ann finessing
+annLambda_AFA = seq(.0001,.001,.0001)  #best tune is continuously smaller, lower bound extended. Examine 100x finer scale
+ann = ozone_tuning_ANN(afa_8_hr, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean",annLambda_AFA)
+plot(ann)
+```
+
+
+#AFA_transformed tuning #1
+```{r}
+#dataset
+afa_8_hr_trans = ozone_transformed[-c(2)]#use only AFA measurements
+###Starting Values
+#LASSO
+lassoLambda_AFA_trans = exp(-100:15/10) #initial search space
+#GBM
+boostLambda_AFA_trans = seq(1,10,1) #examine 1-10 for initial search
+#ANN
+annLambda_AFA_trans = seq(1,10,1) #examine 1-10 for initial search
+
+##run models
+afa_trans_tune_1 = ozone_tune_models(afa_8_hr_trans, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean",
+                           lassoLambda_AFA_trans, boostLambda_AFA_trans, annLambda_AFA_trans)
+```
+
+
+#AFA AFA_transformed tuning #2
+```{r}
+###Updated Values
+#LASSO
+lassoLambda_AFA_trans = exp(-150:-35/10) #returned to get smaller  values
+#GBM
+boostLambda_AFA_trans = seq(.1,afa_trans_tune_1[2],.1) #best tune is 1. Examine 10x finer scale
+#ANN
+annLambda_AFA_trans = seq(.1,afa_trans_tune_1[3],.1)  #best tune is 1. Examine 10x finer scale
+
+##run models
+afa_trans_tune_2 = ozone_tune_models(afa_8_hr_trans, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_AFA_trans, boostLambda_AFA_trans, annLambda_AFA_trans)
+```
+#AFA transformed tuning #3
+```{r}
+###Updated Values
+#Keep LASSO values
+boostLambda_AFA_trans = seq(.07,afa_trans_tune_2[2]+.07,.01) #best tune is 0.1, lower & upper bound extended Examine 10x finer scale
+annLambda_AFA_trans = seq(.01,afa_trans_tune_2[3],.01)  #best tune is 0.1, lower bound extended. Examine 10x finer scale
+
+afa_trans_tune_3 = ozone_tune_models(afa_8_hr_trans, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_AFA_trans, boostLambda_AFA_trans, annLambda_AFA_trans)
+```
+#AFA transformed tuning #4 (final Tune)
+```{r}
+###Updated Values
+boostLambda_AFA_trans = seq(.01,afa_trans_tune_2[2]+.05,.01) #shorten for final model
+annLambda_AFA_trans = seq(.001,afa_trans_tune_3[3],.001)  #best tune is 0.01, lower bound examined. Examine 10x finer scale
+
+afa_trans_tune_4 = ozone_tune_models(afa_8_hr_trans, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_AFA_trans, boostLambda_AFA_trans, annLambda_AFA_trans)
+#final ann finnessing
+annLambda_AFA_trans = seq(.0002,.002,.0002)  #best tune is continuously smaller, lower bound extended. Examine 100x finer scale
+ann = ozone_tuning_ANN(afa_8_hr, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean",annLambda_AFA)
+plot(ann)
+```
+
+
+
+
+
+#MAN tuning #1
+```{r}
+#dataset
+man_8_hr = ozone_8_hr[-c(1)]#use only MAN measurements
+###Starting Values
+#LASSO
+lassoLambda_MAN = exp(-100:15/10) #initial search space
+#GBM
+boostLambda_MAN = seq(1,10,1) #examine 1-10 for initial search
+#ANN
+annLambda_MAN = seq(1,10,1) #examine 1-10 for initial search
+##run models
+man_tune_1 = ozone_tune_models(man_8_hr, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", 
+                               lassoLambda_MAN, boostLambda_MAN, annLambda_MAN)
+```
+
+
+#MAN tuning #2
+```{r}
+###Updated Values
+lassoLambda_MAN = exp(-150:-35/10) #returned to get smaller  values
+boostLambda_MAN = seq(.1,man_tune_1[2],.1) #best tune is 1, lower bound. Examine 10x finer scale
+annLambda_MAN = seq(.1,man_tune_1[3],.1)  #best tune is 1, lower bound. Examine 10x finer scale
+##run models
+man_tune_2 = ozone_tune_models(man_8_hr, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_MAN, boostLambda_MAN, annLambda_MAN)
+```
+#MAN tuning #3
+```{r}
+###Updated Values - 
+#Keep LASSO lambda since best tune lies within distribution of values
+boostLambda_MAN = seq(.01,man_tune_2[2]+.3,.01) #best tune is 0.1, lower & upper bound extended. Examine 10x finer scale
+annLambda_MAN = seq(.01,man_tune_2[3],.01)  #best tune is 0.1, lower bound extended. Examine 10x finer scale
+#run
+man_tune_3 = ozone_tune_models(man_8_hr, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_MAN, boostLambda_MAN, annLambda_MAN)
+```
+#MAN tuning #4 (final Tune)
+```{r}
+###Updated Values
+boostLambda_MAN = seq(.1,.2,.01) #shorten scale for final models
+annLambda_MAN = seq(.001,.01,.001)  #best tune is continuously smaller, lower bound extended. Examine 100x finer scale
+
+man_tune_4 = ozone_tune_models(man_8_hr, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_MAN, boostLambda_MAN, annLambda_MAN)
+#final ann finnessing
+annLambda_MAN = seq(.0001,.0011,.0001)  #best tune is continuously smaller, lower bound extended. Examine 100x finer scale
+ann = ozone_tuning_ANN(man_8_hr, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean",annLambda_MAN)
+plot(ann)
+```
+
+
+#MAN_transformed tuning #1
+```{r}
+#dataset
+man_8_hr_trans = ozone_transformed[-c(1)]#use only MAN measurements
+###Starting Values
+#LASSO
+lassoLambda_MAN_trans = exp(-100:15/10) #initial search space
+#GBM
+boostLambda_MAN_trans = seq(1,10,1) #examine 1-10 for initial search
+#ANN
+annLambda_MAN_trans = seq(1,10,1) #examine 1-10 for initial search
+
+##run models
+man_trans_tune_1 = ozone_tune_models(man_8_hr_trans, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean",
+                           lassoLambda_MAN_trans, boostLambda_MAN_trans, annLambda_MAN_trans)
+```
+
+
+#MAN transformed tuning #2
+```{r}
+###Updated Values
+#LASSO
+lassoLambda_MAN_trans = exp(-150:-35/10) #returned to get smaller  values
+#GBM
+boostLambda_MAN_trans = seq(.1,man_trans_tune_1[2],.1) #best tune is 1. Examine 10x finer scale
+#ANN
+annLambda_MAN_trans = seq(.1,man_trans_tune_1[3],.1)  #best tune is 1. Examine 10x finer scale
+
+##run models
+man_trans_tune_2 = ozone_tune_models(man_8_hr_trans, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_MAN_trans, boostLambda_MAN_trans, annLambda_MAN_trans)
+```
+#MAN transformed tuning #3
+```{r}
+###Updated Values
+#Keep LASSO values
+boostLambda_MAN_trans = seq(.01,man_trans_tune_2[2]+.1,.01) #best tune is 0.1, lower & upper bound extended Examine 10x finer scale
+annLambda_MAN_trans = seq(.01,man_trans_tune_2[3],.01)  #best tune is 0.1, lower bound extended. Examine 10x finer scale
+
+man_trans_tune_3 = ozone_tune_models(man_8_hr_trans, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_MAN_trans, boostLambda_MAN_trans, annLambda_MAN_trans)
+```
+#MAN transformed tuning #4 (final Tune)
+```{r}
+###Updated Values
+boostLambda_MAN_trans = seq(.01,man_trans_tune_2[2]+.05,.01) #shorten for final model
+annLambda_MAN_trans = seq(.001,man_trans_tune_3[3],.001)  #best tune is 0.01, lower bound examined. Examine 10x finer scale
+
+man_trans_tune_4 = ozone_tune_models(man_8_hr_trans, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", lassoLambda_MAN_trans, boostLambda_MAN_trans, annLambda_MAN_trans)
+#final ann finnessing
+annLambda_MAN_trans = seq(.0002,.002,.0002)  #best tune is continuously smaller, lower bound extended. Examine 100x finer scale
+ann = ozone_tuning_ANN(man_8_hr, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean",annLambda_MAN)
+plot(ann)
+```
+
+
+
+
+
+
+
+
+### PREDICTIVE MODELING ###
+
+#Model suite function
+```{r}
+ozone_models <- function(ozone_data_frame, ozone_col,lambdaLASSO, lambdaBOOST, lamdaANN){
+  #set up outer cross validation shell
+  p = ncol(ozone_data_frame)-1 #Get total number of predictor variables
+  n = dim(ozone_data_frame)[1]
+  nfolds = 5
+  groups = rep(1:nfolds,length=n)  #produces list of group labels
+  set.seed(28) #for reproducibility
+  cvgroups = sample(groups,n)  #orders randomly
+  
+  # set up storage for predicted values from the double-cross-validation
+  allpredictedCV = rep(NA,n)
+  # set up storage to see what models are "best" on the inner loops
+  allbestTypes = rep(NA,nfolds)
+  allbestPars = vector("list",nfolds)
+  allbestModels = vector("list",nfolds)
+  allbestRSME = rep(NA,nfolds)
+  #allbestR2 = rep(NA,nfolds)
+  #fold_df_list = vector("list",nfolds)
+  all_best_Types = c("Linear", "Generalized Linear Model", "LASSO Regression", "Linear Regression with Forward Selection",
+                     "General Additive Model", "Random Forest", "Gradient Boosted Trees", "Artificial Neural Net")
+  
+  # loop through outer splits
+  for (j in 1:nfolds)  {  
+    #fold_df = data.frame(all_best_Types)
+    fold_msg = paste("Fold #", j)
+    print(fold_msg)
+    print(Sys.time())
+    groupj = (cvgroups == j)
+    traindata = ozone_data_frame[!groupj,]
+    trainx = model.matrix(traindata[[ozone_col]] ~ ., data = traindata)[,-1]
+    trainy = traindata[[ozone_col]]
+    validdata = ozone_data_frame[groupj,]
+    validx = model.matrix(validdata[[ozone_col]] ~ ., data = validdata)[,-1]
+    validy = validdata[[ozone_col]]
+    
+    #specify data to be used
+    dataused=traindata
+    
+    # model-fitting process
+    # set up training method
+    set.seed(88)
+    ozone = dataused[[ozone_col]]
+    training = trainControl(method = "cv", number = 5) #5 for computational feasibility
+    #fit linear model
+    fit_lm = train(formula(paste(ozone_col, " ~ .")),
+                          data = dataused,
+                          method = "lm",
+                          trControl = training)
+    print("Linear Regression Model has been fitted")
+    r2_message = paste("Best R2: ",round(fit_lm$results$Rsquared,3))
+    print(r2_message)
+    print(Sys.time())
+    #fit general linear model
+    fit_glm = train(formula(paste(ozone_col, " ~ .")),
+                          data = dataused,
+                          method = "glm",
+                          trControl = training)
+    print("Generalized Linear Model has been fitted")#debug
+    r2_message = paste("Best R2: ",round(fit_glm$results$Rsquared,3))
+    print(r2_message)
+    print(Sys.time())
+    #fit linear regression with LASSO 
+    fit_LASSO = train(formula(paste(ozone_col, " ~ .")),
+                          data = dataused,
+                          method = "glmnet",
+                          trControl = training,
+                          tuneGrid = expand.grid(alpha=c(1),lambda=lambdaLASSO))
+    print("LASSO Model has been fitted")#debug
+    r2_message = paste("Best R2: ",round(max(fit_LASSO$results$Rsquared, na.rm=T),3))
+    print(r2_message)
+    print(Sys.time())
+    #fit linear regression with forward selection model
+    fit_fs = train(formula(paste(ozone_col, " ~ .")),
+                          data = dataused,
+                          method = "leapForward",
+                          trControl = training,
+                          tuneGrid = expand.grid(nvmax = seq(1, p, 1))) #p is max number of variables w factors
+    print("Linear Regression with Forward Selection Model has been fitted")
+    r2_message = paste("Best R2: ",round(max(fit_fs$results$Rsquared),3))
+    print(r2_message)
+    print(Sys.time())
+    #fit GAM with splines
+    fit_gam_spline = train(formula(paste(ozone_col, " ~ .")),
+                            data = dataused,
+                            method = "gam",
+                            trControl = training,
+                            tuneGrid = data.frame(method="REML", select=TRUE))
+    print("GAM with Splines has been fitted") #debug
+    r2_message = paste("Best R2: ",round(max(fit_gam_spline$results$Rsquared),3))
+    print(r2_message)
+    print(Sys.time())
+    #fit Random Forest model
+    fit_rf = train(formula(paste(ozone_col, " ~ .")), 
+                        data = dataused,
+                        method = "rf",
+                        tuneGrid = expand.grid(mtry = 1:5), 
+                        trControl = training)
+    print("Random Forest has been fitted") #debug
+    r2_message = paste("Best R2: ",round(max(fit_rf$results$Rsquared),3))
+    print(r2_message)    
+    print(Sys.time())
+    #fit Boosted Trees 
+    fit_boost = train(formula(paste(ozone_col, " ~ .")),
+                            data = dataused,
+                            method = "gbm",
+                            trControl = training,
+                            tuneGrid = expand.grid(interaction.depth = (1:3), #use smaller interaction depth for  feasibility
+                                          n.trees = 300,  #use 300 trees (more trees is ideal, but computationally unfeasible)
+                                          shrinkage = lambdaBOOST, # tuned hyperparameter vector
+                                          n.minobsinnode = 10), # use default 
+                             verbose=FALSE) #no readout
+    print("Boosted Trees has been fitted") #debug
+    r2_message = paste("Best R2: ",round(max(fit_boost$results$Rsquared),3))
+    print(r2_message)    
+    print(Sys.time())
+    #fit Artificial Neural Net 
+    fit_ANN = train(formula(paste(ozone_col, " ~ .")),
+                   data = dataused,
+                   method = "nnet",
+                   tuneGrid = expand.grid(size = (1:3), decay = lamdaANN), #may need to limit for computational feasibility
+                   trace = FALSE,
+                   preProc = c("center", "scale"), #good idea to prevent one predictor from overwhelming the model
+                   trControl = training,
+                  verbose=FALSE)
+    print("Artificial Neural Net has been fitted") #debug
+    r2_message = paste("Best R2: ",round(max(fit_ANN$results$Rsquared, na.rm = T),3))
+    print(r2_message) 
+    
+    ### identify selected model to fit to full data 
+    all_best_Pars = list(fit_lm$bestTune,fit_glm$bestTune,fit_LASSO$bestTune,fit_fs$bestTune,fit_gam_spline$bestTune,fit_rf$bestTune,
+                         fit_boost$bestTune,fit_ANN$bestTune)
+    all_best_Models = list(fit_lm$finalModel,fit_glm,fit_LASSO,fit_fs,fit_gam_spline,fit_rf,
+                           fit_boost$finalModel,fit_ANN)
+    all_best_RMSE = c(fit_lm$results$RMSE,fit_glm$results$RMSE,min(fit_LASSO$results$RMSE),min(fit_fs$results$RMSE),
+                      fit_gam_spline$results$RMSE,min(fit_rf$results$RMSE),min(fit_boost$results$RMSE),min(fit_ANN$results$RMSE))
+    one_best_Type = all_best_Types[which.min(all_best_RMSE)]
+    one_best_Pars = all_best_Pars[which.min(all_best_RMSE)]
+    one_best_Model = all_best_Models[which.min(all_best_RMSE)]
+  
+    # store
+    allbestTypes[j] = one_best_Type
+    allbestPars[[j]] = one_best_Pars
+    #store to compare models
+    allbestModels[[j]] = one_best_Model
+    allbestRSME[j] = min(all_best_RMSE)
+    #print("To the loops!") #debug
+    
+    if (one_best_Type == "Linear") {  #linear model
+      print("------------------------->Linear model works best")
+      ###one_best_Model not fitting correctly
+      allpredictedCV[groupj] = predict(lm(dataused[[ozone_col]] ~ ., data=dataused),validdata) ### Predict for lienra models
+      
+    } else if (one_best_Type == "Generalized Linear Model") { 
+      print("------------------------->General Linear Model works best")
+      allpredictedCV[groupj] = predict(one_best_Model,validdata)
+      
+    } else if (one_best_Type == "LASSO Regression") { 
+      print("------------------------->LASSO Regression works best")
+      allpredictedCV[groupj] = predict.train(fit_LASSO,validdata)
+      
+    } else if (one_best_Type == "Linear Regression with Forward Selection") { #linear with selection
+      print("------------------------->Forward Regression works best")
+      allpredictedCV[groupj] = predict.train(fit_fs,validdata)
+      
+    } else if (one_best_Type == "General Additive Model") { ###GAM with p-splines
+      print("------------------------->General Additive Model works best")
+      allpredictedCV[groupj] = predict.train(fit_gam_spline,validdata)
+      
+    } else if (one_best_Type == "Random Forest") { 
+      print("------------------------->Random Forest works best")
+      allpredictedCV[groupj] = predict.train(fit_rf,validdata,type="raw") #raw for numeric predictions
+      
+    } else if (one_best_Type == "Gradient Boosted Trees") { 
+      print("------------------------->Gradient Boosted Trees works best")
+      allpredictedCV[groupj] = predict.train(fit_boost,validdata ) ### should I use predict() or predict.train() here?
+      
+    } else if (one_best_Type == "Artificial Neural Net") { 
+      print("------------------------->Artificial Neural Net works best")
+      allpredictedCV[groupj] = predict.train(fit_ANN,validdata) ### should I use predict() or predict.train() here?
+                                                                ### why doesn't it work with one_best_Model?
+    } 
+  }
+
+  
+  #assessment
+  y = ozone_data_frame[[ozone_col]]
+  RMSE = sqrt(mean(allpredictedCV-y)^2)
+  R2 = 1-sum((allpredictedCV-y)^2)/sum((y-mean(y))^2)
+  final_model = allbestModels[[which.min(allbestRSME)]]
+  final_type = allbestTypes[which.min(allbestRSME)]
+  final_pars = allbestPars[[which.min(allbestRSME)]]
+  
+  res_list = c(final_model, final_type, final_pars)
+  
+  rmse = paste("Final RSME:", RMSE)
+  r2 = paste("Final R2:", R2)
+  finMod = paste("Overall Best Model:", final_type)
+  print(rmse)
+  print(r2)
+  print(finMod)
+  print(Sys.time())
+  return(res_list)
+    } # end function ozone_models
+```
+
+#AFA 8 Hour
+```{r, warning=FALSE}
+
+afa_8_hr = ozone_8_hr[,-c(2)]
+afa_8_hr_cv_results = ozone_models(afa_8_hr, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", 
+                                          lassoLambda_AFA, boostLambda_AFA, annLambda_AFA)
+```
+#AFA Final Fit
+```{r}
+afa_final_pars = data.frame(afa_8_hr_cv_results[3])
+training = trainControl(method = "cv", number = 10)
+afa_finalModelGrid <-  data.frame(interaction.depth = afa_final_pars$interaction.depth, 
+                    n.trees = afa_final_pars$n.trees, 
+                    shrinkage = afa_final_pars$shrinkage,
+                    n.minobsinnode = afa_final_pars$n.minobsinnode) # use default
+
+ # cross-validation of Boosted Tree
+
+afa_fit_final = train(AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean ~ ., 
+                      data = afa_8_hr,
+                      verbose=FALSE,
+                      method = "gbm",
+                      trControl = training,
+                      tuneGrid = afa_finalModelGrid)
+
+summary(afa_fit_final)
+afa_fit_final
+```
+
+#AFA Transformed
+```{r, warning=FALSE}
+afa_transformed = ozone_transformed[-c(2)]
+afa_trans_cv_results = ozone_models(afa_transformed, "AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", 
+                                          lassoLambda_AFA_trans, boostLambda_AFA_trans, annLambda_AFA_trans)
+```
+#Fit final model
+```{r}
+afa_trans_final_pars = data.frame(afa_trans_cv_results[3])
+training = trainControl(method = "cv", number = 10)
+afa_trans_finalModelGrid <-  data.frame(interaction.depth = afa_trans_final_pars$interaction.depth, 
+                    n.trees = afa_trans_final_pars$n.trees, 
+                    shrinkage = afa_trans_final_pars$shrinkage,
+                    n.minobsinnode = afa_trans_final_pars$n.minobsinnode) # use default
+
+ # cross-validation of Boosted Tree
+afa_trans_fit_final = train(AFA_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean ~ ., 
+                      data = afa_transformed,
+                      verbose=FALSE,
+                      method = "gbm",
+                      trControl = training,
+                      tuneGrid = afa_trans_finalModelGrid)
+
+summary(afa_trans_fit_final)
+afa_trans_fit_final
+```
+
+#MAN 8 Hour
+```{r, warning=FALSE}
+man_8_hr = ozone_8_hr[-c(1)]
+man_8_hr_cv_results = ozone_models(man_8_hr, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", 
+                                          lassoLambda_MAN, boostLambda_MAN, annLambda_MAN)
+```
+#Fit MAN 8 Hour Final Model
+```{r}
+man_final_pars = data.frame(man_8_hr_cv_results[3])
+training = trainControl(method = "cv", number = 10)
+man_finalModelGrid <-  data.frame(interaction.depth = man_final_pars$interaction.depth, 
+                    n.trees = man_final_pars$n.trees, 
+                    shrinkage = man_final_pars$shrinkage,
+                    n.minobsinnode = man_final_pars$n.minobsinnode) # use default
+
+ # cross-validation of Boosted Tree
+
+man_fit_final = train(MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean ~ ., 
+                      data = man_8_hr,
+                      verbose=FALSE,
+                      method = "gbm",
+                      trControl = training,
+                      tuneGrid = man_finalModelGrid)
+
+summary(man_fit_final)
+man_fit_final
+```
+
+#MAN Transformed
+```{r, warning=FALSE}
+man_transformed = ozone_transformed[-c(1)]
+man_trans_cv_results = ozone_models(man_transformed, "MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean", 
+                                          lassoLambda_MAN_trans, boostLambda_MAN_trans, annLambda_MAN_trans)
+```
+#Fit final model
+```{r}
+man_trans_final_pars = data.frame(man_trans_cv_results[3])
+training = trainControl(method = "cv", number = 10)
+man_trans_finalModelGrid <-  data.frame(interaction.depth = man_trans_final_pars$interaction.depth, 
+                    n.trees = man_trans_final_pars$n.trees, 
+                    shrinkage = man_trans_final_pars$shrinkage,
+                    n.minobsinnode = man_trans_final_pars$n.minobsinnode) # use default
+
+ # cross-validation of Boosted Tree
+man_trans_fit_final = train(MAN_Ozone_8.HR.RUN.AVG.BEGIN.HOUR_Arithmetic.Mean ~ ., 
+                      data = man_transformed,
+                      verbose=FALSE,
+                      method = "gbm",
+                      trControl = training,
+                      tuneGrid = man_trans_finalModelGrid)
+
+summary(man_trans_fit_final)
+man_trans_fit_final
+```
+
+
+```{r}
+#run all above
+```
+
