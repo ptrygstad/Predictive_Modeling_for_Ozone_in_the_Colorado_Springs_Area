@@ -28,9 +28,12 @@ Data Cleaning: Clean and combine records to create master data table in Python
 
 Modeling: Run machine learning models and select best fit in r
 #
-SOFTWARE USED
+SOFTWARE USED:
+
 Python - Spyder 5.1.5 as part of Anaconda Navigator suite
+
 r - Rstudio, Posit Software
+
 #
 DATA USED
 
